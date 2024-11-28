@@ -1,0 +1,478 @@
+---
+title: "p8105_jt3466_hw6"
+author: "Johnstone Tcheou"
+date: "2024-11-24"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+# Question 1
+
+```{r p1 data import}
+weather_df <-
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+
+```{r p1 slr}
+weather_df <- 
+  weather_df |> 
+  modelr::bootstrap(n = 5000) |> 
+  mutate(
+    slr_models = map(strap, \(df) lm(tmax ~ tmin, data = df)), 
+    slr_results = map(slr_models, broom::tidy),
+    slr_glance = map(slr_models, broom::glance)
+  ) 
+
+```
+
+```{r q1 r2 distribution and ci}
+weather_df_rsq <-
+  weather_df |> 
+  select(-strap, -slr_models, -slr_results) |> 
+  unnest(slr_glance) |> 
+  select(.id, r.squared) 
+
+weather_df_rsq |> 
+  ggplot(aes(r.squared)) +
+  geom_histogram() 
+
+weather_rsq_ci <-
+  weather_df_rsq |>  
+  summarize(
+    ci_lower = quantile(r.squared, 0.025),
+    ci_upper = quantile(r.squared, 0.975)
+  )
+```
+
+As pictured above, with 5000 bootstrap samples, the distribution of estimated r squared is normally distributed, with a mean estimated r squared of `r weather_df_rsq |> pull(r.squared) |> mean()`. The 95% CI for the estimated r squared is (`r weather_rsq_ci |> pull(ci_lower) |> nth(1)`, `r weather_rsq_ci |> pull(ci_upper) |> nth(1)`). As such, `tmin` explains `r weather_df_rsq |> pull(r.squared) |> mean() * 100`% of the variability in `tmax`. 
+
+```{r q1 log product of estimates}
+weather_df_log_estimates <-
+  weather_df |> 
+  select(-strap, -slr_models, -slr_glance) |> 
+  unnest(slr_results) |> 
+  select(.id, term, estimate) |> 
+  group_by(.id) |> 
+  mutate(
+    slope = lag(estimate),
+    intercept_slope = estimate*slope,
+    log_intercept_slope = log10(estimate*lag(estimate))
+  ) |> 
+  filter(term == "tmin") |> 
+  select(-term) |> 
+  rename(
+    intercept = estimate
+  ) |> 
+  pivot_longer(
+    cols = intercept:log_intercept_slope,
+    names_to = "terms"
+  ) |> 
+  filter(terms == "log_intercept_slope") |> 
+  select(-terms) |> 
+  rename(log_intercept_slope = value)
+
+weather_df_log_estimates |> 
+  ggplot(aes(log_intercept_slope)) +
+    geom_histogram() 
+
+
+weather_df_log_est_ci <-
+  weather_df_log_estimates |> 
+  group_by() |> 
+  summarize(
+    ci_lower = quantile(log_intercept_slope, 0.025),
+    ci_upper = quantile(log_intercept_slope, 0.975)
+  )
+```
+
+Likewise, the log base 10 of the product of the estimated intercept and estimated slope follows an approximately normal distribution. The average estimated log base 10 of the product of the estimated intercept and estimated slope across the 5000 bootstrap samples is `r weather_df_log_estimates |> pull(log_intercept_slope) |> mean()`. The 95% CI around this estimated mean is (`r weather_df_log_est_ci |> pull(ci_lower) |> nth(1)`, `r weather_df_log_est_ci |> pull(ci_upper) |> nth(1)`). 
+
+# Question 2
+
+```{r p2 data import}
+homicide_df <- 
+  read_csv(
+    file = "https://raw.githubusercontent.com/washingtonpost/data-homicides/refs/heads/master/homicide-data.csv",
+    na = c("Unknown", "", NA, "NA")
+  ) |> 
+  mutate(
+    reported_date = case_match(
+      reported_date,
+      201511105 ~ 20151105,
+      201511018 ~ 20151018,
+      .default = reported_date
+    ),
+    reported_date = ymd(reported_date),
+    city_state = paste(city, state, sep = ", "),
+    solved = case_when(
+      disposition == "Closed by arrest" ~ 1,
+      disposition == "Closed without arrest" ~ 0,
+      disposition == "Open/No arrest" ~ 0
+    )
+  ) |>  
+  filter(!(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")) & victim_race %in% c("White", "Black"))
+```
+Some observations have `"Unknown"` for `victim_age`, so to catch these in the `read_csv`, they are to be interpreted as `NA`. This way, `victim_age` is a `r homicide_df |> pull(victim_age) |> typeof()` variable, i.e. numeric. 
+
+```{r p2 baltimore}
+baltimore_logistic <-
+  homicide_df |> 
+  filter(city_state == "Baltimore, MD") |> 
+  glm(solved ~ victim_age + victim_sex + victim_race, data = _, family = binomial()) |> 
+  broom::tidy() |> 
+  mutate(
+    ci_upper = estimate + 1.96 * std.error,
+    ci_lower = estimate - 1.96 * std.error
+  )
+
+baltimore_logistic |> 
+  filter(term == "victim_sexMale") |> 
+  pull(estimate) |>  
+  exp()
+
+baltimore_logistic |> 
+  filter(term == "victim_sexMale") |> 
+  pull(ci_lower) |>  
+  exp()
+
+baltimore_logistic |> 
+  filter(term == "victim_sexMale") |> 
+  pull(ci_upper) |> 
+  exp()
+```
+
+From this logistic regression model, the estimated odds of solving homicides for male victims is `r baltimore_logistic |> filter(term == "victim_sexMale") |> pull(estimate) |>  exp()` compared to female victims, adjusting for race and age. The 95% CI for this estimated adjusted odds ratio is (`r baltimore_logistic |> filter(term == "victim_sexMale") |> pull(ci_lower) |>  exp()`, `r baltimore_logistic |> filter(term == "victim_sexMale") |> pull(ci_upper) |>  exp()`). 
+
+```{r p2 logistic reg all cities}
+city_or_ci <-
+  homicide_df |> 
+  nest(data = -city_state) |> 
+  mutate(
+    logistic_reg = map(data, \(df) glm(solved ~ victim_age + victim_sex + victim_race, data = df, family = binomial())),
+    results = map(logistic_reg, broom::tidy)
+  ) |> 
+  select(-data, -logistic_reg) |> 
+  unnest(results) |> 
+  filter(term == "victim_sexMale") |> 
+  mutate(
+    or = exp(estimate),
+    or_ci_lower = exp(estimate - 1.96 * std.error),
+    or_ci_upper = exp(estimate + 1.96 * std.error)
+  ) |> 
+  select(city_state, or, or_ci_lower, or_ci_upper)
+```
+
+```{r p2 plot ors cis}
+city_or_ci |> 
+  mutate(
+    city_state = fct_reorder(city_state, or)
+  ) |> 
+  ggplot(aes(x = city_state, y = or, fill = city_state)) +
+  geom_col() +
+  geom_errorbar(aes(ymin = or_ci_lower, ymax = or_ci_upper)) + 
+  geom_hline(yintercept = 1.0, linetype = "dashed", color = "black") +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5) 
+  ) +
+  viridis::scale_fill_viridis(discrete = TRUE) +
+  labs(
+    x = "City, state",
+    y = "Adjusted estimated OR of solved homicides\n for male victims compared to female victims"
+  ) +
+  guides(
+    fill = "none"
+  ) 
+
+```
+The estimated ORs of solved homicides for male victims compared to female victims, adjusting for race and age, is consistently between 0 and 1 for a majority of cities, up until Atlanta, GA which has an OR of `r city_or_ci |> filter(city_state == "Atlanta, GA") |> pull(or)`. 
+
+At the lower end, the ORs do not include the null value of 1 except for Long Beach, CA, San Bernardino, CA, and a smattering of others, including SF, Boston, MA, Sacramento, CA, Fort Worth, TX, San Antonio, TX, and Milwaukee, WI. After this city, all of the ORs include the null of 1. 
+
+Despite the large effect size in Albuquerque, NM, with an OR of `r city_or_ci |> filter(city_state == "Albuquerque, NM") |> pull(or)`, the CI is very wide and barely includes 1 with a lower end of `r city_or_ci |> filter(city_state == "Albuquerque, NM") |> pull(or_ci_lower)`. On the opposite direction, NYC has a large effect size with `r city_or_ci |> filter(city_state == "New York, NY") |> pull(or)` and a CI of (`r city_or_ci |> filter(city_state == "New York, NY") |> pull(or_ci_lower)`, `r city_or_ci |> filter(city_state == "New York, NY") |> pull(or_ci_upper)`). This is likely a result of sample size - NYC has a sample size of `r homicide_df |> filter(city_state == "New York, NY") |> nrow()`, while Albuquerque has a sample size of `r homicide_df |> filter(city_state == "Albuquerque, NM") |> nrow()`, less than half the sample size in NYC.
+
+# Question 3    
+
+```{r p3 data import}
+birthweight_df <- 
+  read_csv(
+    file = "https://p8105.com/data/birthweight.csv",
+    na = c("", ".", "NA", NA)
+  ) |> 
+  janitor::clean_names() |>
+  mutate(
+    babysex = 
+        case_match(babysex,
+            1 ~ "male",
+            2 ~ "female"
+        ),
+    babysex = fct_infreq(babysex),
+    frace = 
+        case_match(frace,
+            1 ~ "white",
+            2 ~ "black", 
+            3 ~ "asian", 
+            4 ~ "puerto rican", 
+            8 ~ "other"),
+    frace = fct_infreq(frace),
+    mrace = 
+        case_match(mrace,
+            1 ~ "white",
+            2 ~ "black", 
+            3 ~ "asian", 
+            4 ~ "puerto rican",
+            8 ~ "other"),
+    mrace = fct_infreq(mrace),
+    malform = as.logical(malform),
+    id = row_number()
+  ) 
+
+birthweight_df |> 
+  filter(is.na(bwt))
+
+summary(birthweight_df)
+
+
+```
+
+```{r p3 eda}
+birthweight_df |> 
+  select(id, bwt) |> 
+  ggplot(aes(x = bwt)) +
+  geom_histogram()
+
+birthweight_df |> 
+  select(id, wtgain) |> 
+  ggplot(aes(x = wtgain)) +
+  geom_histogram()
+
+birthweight_df |> 
+  ggplot(aes(x = babysex, y = bwt, fill = babysex)) +
+  geom_boxplot()
+
+birthweight_df |> 
+  ggplot(aes(x = babysex, y = bwt, fill = babysex)) +
+  geom_boxplot() +
+  facet_wrap(~mrace)
+
+birthweight_df |> 
+  ggplot(aes(x = babysex, y = bwt, fill = babysex)) +
+  geom_boxplot() +
+  facet_wrap(~frace)
+
+birthweight_df |> 
+  ggplot(aes(x = babysex, y = bwt, fill = babysex)) +
+  geom_boxplot() +
+  facet_wrap(~malform)
+
+birthweight_df |> 
+  ggplot(aes(x = parity, y = bwt, color = parity)) + 
+  geom_point()
+
+birthweight_df |> 
+  group_by(parity) |> 
+  summarize(
+    count = n()
+  ) # small sample size
+
+birthweight_df |> 
+  ggplot(aes(x = pnumlbw, y = bwt, color = pnumlbw)) + 
+    geom_point()
+
+birthweight_df |> 
+  group_by(pnumlbw) |> 
+  summarize(
+    count = n()
+  )
+
+birthweight_df |> 
+  group_by(pnumsga) |> 
+  summarize(
+    count = n()
+  )
+
+
+birthweight_df |> 
+  ggplot(aes(x = wtgain, y = bwt)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(stat = "smooth", se = FALSE)
+
+birthweight_df |> 
+  ggplot(aes(x = ppwt, y = bwt)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(stat = "smooth", se = FALSE)
+
+birthweight_df |> 
+  ggplot(aes(x = ppbmi, y = bwt)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(stat = "smooth", se = FALSE)
+
+birthweight_df |> 
+  ggplot(aes(x = delwt, y = bwt)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(stat = "smooth", se = FALSE)
+
+birthweight_df |> 
+  ggplot(aes(x = fincome, y = bwt)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(stat = "smooth", se = FALSE)
+
+birthweight_df |> 
+  ggplot(aes(x = momage, y = bwt)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(stat = "smooth", se = FALSE)
+
+birthweight_df |> 
+  ggplot(aes(x = smoken, y = bwt)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(stat = "smooth", se = FALSE)
+```
+In exploring the data, the outcome of interest, birthweight (`bwt`) in grams, is approximately normally distributed, though it has a left skew. The median is at `r birthweight_df |> pull(bwt) |> median()` g, with a mean of `r birthweight_df |> pull(bwt) |> mean()` g, a max of `r birthweight_df |> pull(bwt) |> max()` g, and a min of `r birthweight_df |> pull(bwt) |> min()` g.
+
+Based on these visualizations to explore possible associations with potential predictors and birthweight, `mrace` does seem to have an effect on the median birthweight, with Puerto Rican and Asian mothers having a similar median birthweight as White mothers, while Black mothers have a lower median birthweight. For paternal race, there is more variation in its effect on median birthweight. As before Black fathers have a lower median birthweight compared to fathers of other races, but there also seems to be a slightly lower median birthweight for female babies compared to male babies for White, Black, and Puerto Rican fathers. 
+
+Interestingly, the presence of malformations that could affect weight has a disproportionately greater effect among female babies than male babies, though even babies without malformations display a disparity in median birthweight, with female babies still having a lower median birthweight. The median birthweight for male babies appears the same for those with and without malformations. 
+
+For maternal characteristics, parity is predominately 0 for most subjects with a few having more than 0 prior births, so it would not be an insightful covariate to include. No mothers had prior low birth weight babies nor prior small for gestational age babies, making them likewise unimportant covariates. 
+
+Potential predictors of these maternal characteristics for birthweight could include weight gain, prepregnancy weight, and especially weight at delivery. These covariates show an approximately linear relation with increasing weight gain and weight at these stages approximating to an increase in birthweight. However, the relationship between maternal weight at delivery and birthweight is somewhat parabolic, suggesting it may be best explained by a quadratic term instead. 
+
+Number of cigarettes smoked has a less steep relationship with birthweight but broadly shows more cigarettes smoked is associated with lower birthweight babies. Maternal income has the opposite magnitude relationship, with higher birthweight associated with higher maternal income. Maternal age also has a parabolic relationship, with lower birthweight at the extreme ends of below 15 and above 35 years old. 
+
+Based on these, to best predict birthweight, a variety of baby characteristics and maternal characteristics (physical, social, and behavioral) were selected as covariates based on the approximate magnitude of their relationship with birthweight, in favor over parsimony. `babysex` is a particularly important variable to include, given that female babies appear disproportionately affected by some of these covariates, like malformations and parental race. As such, the interactions of baby sex and parental races were included. However, given the main difference in birthweight was seen for Black parents, `frace` and `mrace` were recategorized to be binary Black or White/Asian/Puerto Rican/Other. Other factor variables were releveled to ensure the correct reference group is selected when running the model.
+
+```{r first birthweight model}
+birthweight_df <-
+  birthweight_df |> 
+  mutate(
+    frace = as.character(frace),
+    frace = 
+        case_match(frace,
+            "white" ~ "white",
+            "black" ~ "non white", 
+            "asian" ~ "non white", 
+            "puerto rican" ~ "non white", 
+            "other" ~ "non white"),
+    frace = fct_relevel(frace, "non white", "white"),
+    mrace = as.character(mrace),
+    mrace = 
+        case_match(mrace,
+            "white" ~ "white",
+            "black" ~ "non white", 
+            "asian" ~ "non white", 
+            "puerto rican" ~ "non white", 
+            "other" ~ "non white"),
+    mrace = fct_relevel(frace, "non white", "white"),
+    babysex = as.factor(babysex),
+    babysex = fct_relevel(babysex, "female", "male")
+  )
+
+
+bwt_model <- lm(bwt ~ babysex + mrace + frace + malform + wtgain + ppwt + I(delwt^2) + fincome + I(momage^2) + babysex*mrace + babysex*frace, data = birthweight_df) |> 
+  broom::tidy()
+```
+
+However, paternal race was estimated as `NA`, indicating collinearity with the other predictors, so it and its interaction term with baby sex should be removed. The interaction term of baby sex and maternal race is also not significant, so it is likewise removed.
+
+```{r second model}
+
+bwt_model <- lm(bwt ~ babysex + mrace + malform + wtgain + ppwt + I(delwt^2) + fincome + I(momage^2), data = birthweight_df)
+
+bwt_model |> 
+  broom::tidy() |> 
+  knitr::kable(digits = 3)
+```
+
+```{r rvf plot}
+
+rvf <-
+  birthweight_df |> 
+  modelr::add_residuals(bwt_model) |> 
+  modelr::add_predictions(bwt_model)
+
+rvf |> 
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point() +
+  geom_hline(yintercept = 0.0, linetype = "dashed", color = "black") +
+  labs(
+    title = "Residuals vs fitted values for birthweight", 
+    xlab = "Fitted values",
+    ylab = "Residuals"
+  )
+  
+```
+
+Based on the residuals vs fitted plot, we see that the residuals have equal variance around the e = 0 line as there is no fanning of homoscedasticity violations. Therefore, the error terms maintain homoscedasticity at all fitted values.
+
+```{r model cross validation}
+bwt_cv_df <-
+  modelr::crossv_mc(birthweight_df, 100) |> 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  ) 
+
+bwt_cv_df <-
+  bwt_cv_df |> 
+  mutate(
+    jt_model = map(train, \(df) lm(bwt ~ babysex + mrace + malform + wtgain + ppwt + I(delwt^2) + fincome + I(momage^2), data = df)),
+    main_fx_model = map(train, \(df) lm(bwt ~ blength + gaweeks, data = df)),
+    interaction_model = map(train, \(df) lm(bwt ~ bhead + blength + babysex + bhead*blength + bhead*babysex + blength*babysex + bhead*blength*babysex, data = df))
+  ) |> 
+  mutate(
+    rmse_jt = map2_dbl(jt_model, test, \(model, df) modelr::rmse(model = model, data = df)),
+    rmse_main = map2_dbl(main_fx_model, test, \(model, df) modelr::rmse(model = model, data = df)),
+    rmse_interaction = map2_dbl(interaction_model, test, \(model, df) modelr::rmse(model = model, data = df))
+  )
+
+
+```
+
+```{r rmse plot}
+
+bwt_cv_df |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(), 
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |> 
+  mutate(
+    model = as_factor(model),
+    model = fct_reorder(model, rmse)
+  ) |> 
+  ggplot(aes(x = model, y = rmse, fill = model)) +
+  geom_violin() +
+  stat_summary(fun = "median", geom = "point", color = "black") +
+  guides(
+    fill = "none"
+  )
+
+bwt_cv_df |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(), 
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |> 
+  group_by(model) |> 
+  summarize(avg_rmse = mean(rmse)) |> 
+  arrange(avg_rmse)
+```
+My model has much higher root mean squared errors compared to the other two models of just the main effects of length at birth and gestational age and the main effects of head circumference, length, sex, and all their interactions. My model focuses more on potential parental predictors than baby covariates, suggesting models that account for baby characteristics like length, head circumference, etc, and especially their interactions, may be better at predicting birthweight than models with parental covariates like my model. 
+
